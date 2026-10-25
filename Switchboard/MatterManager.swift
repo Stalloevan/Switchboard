@@ -56,6 +56,7 @@ final class MatterManager: NSObject, ObservableObject {
     private var rootKeypair: RootKeypair?
     private var controller: MTRDeviceController?
     private var devices: [UInt64: MTRDevice] = [:]
+    private var nodeIDs: [ObjectIdentifier: UInt64] = [:]
     private var pending: PendingBulb?
     private var pairingTimeout: DispatchWorkItem?
 
@@ -112,6 +113,7 @@ final class MatterManager: NSObject, ObservableObject {
         let device = MTRDevice(nodeID: NSNumber(value: bulb.nodeID), controller: controller)
         device.add(self, queue: .main)
         devices[bulb.nodeID] = device
+        nodeIDs[ObjectIdentifier(device)] = bulb.nodeID
         states[bulb.nodeID] = BulbState()
         refresh(bulb.nodeID)
     }
@@ -323,6 +325,7 @@ final class MatterManager: NSObject, ObservableObject {
         controller?.forgetDevice(withNodeID: NSNumber(value: bulb.nodeID))
         if let device = devices.removeValue(forKey: bulb.nodeID) {
             device.remove(self)
+            nodeIDs.removeValue(forKey: ObjectIdentifier(device))
         }
         states.removeValue(forKey: bulb.nodeID)
         bulbs.removeAll { $0.nodeID == bulb.nodeID }
@@ -477,11 +480,11 @@ extension MatterManager: MTRDeviceAttestationDelegate {
 
 extension MatterManager: MTRDeviceDelegate {
     func device(_ device: MTRDevice, stateChanged state: MTRDeviceState) {
-        refresh(device.nodeID.uint64Value)
+        if let nodeID = nodeIDs[ObjectIdentifier(device)] { refresh(nodeID) }
     }
 
     func device(_ device: MTRDevice, receivedAttributeReport attributeReport: [[String: Any]]) {
-        refresh(device.nodeID.uint64Value)
+        if let nodeID = nodeIDs[ObjectIdentifier(device)] { refresh(nodeID) }
     }
 
     func device(_ device: MTRDevice, receivedEventReport eventReport: [[String: Any]]) {}
