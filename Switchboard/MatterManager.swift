@@ -50,6 +50,8 @@ final class MatterManager: NSObject, ObservableObject {
     @Published private(set) var isCommissioning = false
     @Published private(set) var status = ""
     @Published private(set) var pairingFinished = false
+    @Published private(set) var pairingError: String?
+    @Published private(set) var pairingLog: [String] = []
     @Published var errorMessage: String?
 
     private let storage = MatterStorage()
@@ -200,6 +202,16 @@ final class MatterManager: NSObject, ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
+    private func log(_ text: String) {
+        pairingLog.append(text)
+        if pairingLog.count > 200 { pairingLog.removeFirst(pairingLog.count - 200) }
+    }
+
+    private func describe(_ error: Error) -> String {
+        let ns = error as NSError
+        return "\(ns.domain) code \(ns.code): \(ns.localizedDescription)"
+    }
+
     private func report(_ error: Error, action: String) {
         errorMessage = "Couldn't \(action): \(error.localizedDescription)"
     }
@@ -299,7 +311,11 @@ final class MatterManager: NSObject, ObservableObject {
         }
 
         do {
+            pairingLog = []
+            pairingError = nil
+            log("Parsing setup code (\(cleaned.count) characters)")
             let payload = try MTRSetupPayload(onboardingPayload: cleaned)
+            log("Code OK: vendor \(payload.vendorID), product \(payload.productID), discriminator \(payload.discriminator), short discriminator \(payload.hasShortDiscriminator), discovery \(payload.discoveryCapabilities.rawValue)")
             let nodeID = Self.takeNextNodeID()
             let displayName = name.trimmingCharacters(in: .whitespaces)
             pending = PendingBulb(nodeID: nodeID,
@@ -310,6 +326,7 @@ final class MatterManager: NSObject, ObservableObject {
             isCommissioning = true
             status = "Looking for the bulb…"
             startPairingTimeout(nodeID: nodeID)
+            log("Starting session for node \(nodeID), Wi-Fi details \(ssid.isEmpty ? "not given" : "given")")
             try controller.setupCommissioningSession(with: payload, newNodeID: NSNumber(value: nodeID))
         } catch {
             finishPairing(error: error)
@@ -351,7 +368,9 @@ final class MatterManager: NSObject, ObservableObject {
         if let error {
             status = ""
             pending = nil
-            errorMessage = "Pairing failed: \(error.localizedDescription)"
+            let text = describe(error)
+            log("FAILED: \(text)")
+            pairingError = text
         }
     }
 
@@ -421,6 +440,7 @@ extension MatterManager: MTRDeviceControllerDelegate {
         }
 
         status = "Pairing…"
+        log("Secure session established, starting commissioning")
         let params = MTRCommissioningParameters()
         params.deviceAttestationDelegate = self
         if !pending.ssid.isEmpty {
@@ -435,7 +455,16 @@ extension MatterManager: MTRDeviceControllerDelegate {
         }
     }
 
+    func controller(_ controller: MTRDeviceController, statusUpdate status: MTRCommissioningStatus) {
+        log("Status update: \(status.rawValue)")
+    }
+
+    func controller(_ controller: MTRDeviceController, commissioneeHasReceivedNetworkCredentials nodeID: NSNumber) {
+        log("Bulb received the Wi-Fi details and is joining the network")
+    }
+
     func controller(_ controller: MTRDeviceController, commissioningComplete error: Error?, nodeID: NSNumber?) {
+        log("Commissioning finished: \(error.map { describe($0) } ?? "no error")")
         if let error {
             finishPairing(error: error)
             return
@@ -458,6 +487,7 @@ extension MatterManager: MTRDeviceAttestationDelegate {
                                     opaqueDeviceHandle: UnsafeMutableRawPointer,
                                     attestationDeviceInfo: MTRDeviceAttestationDeviceInfo,
                                     error: Error?) {
+        log("Attestation check: \(error.map { describe($0) } ?? "passed")\(error != nil ? " (continuing anyway)" : "")")
         do {
             try controller.continueCommissioningDevice(opaqueDeviceHandle, ignoreAttestationFailure: error != nil)
         } catch {
@@ -468,6 +498,7 @@ extension MatterManager: MTRDeviceAttestationDelegate {
     func deviceAttestationFailed(for controller: MTRDeviceController,
                                  opaqueDeviceHandle: UnsafeMutableRawPointer,
                                  error: Error) {
+        log("Attestation failed: \(describe(error)) (continuing anyway)")
         do {
             try controller.continueCommissioningDevice(opaqueDeviceHandle, ignoreAttestationFailure: true)
         } catch {

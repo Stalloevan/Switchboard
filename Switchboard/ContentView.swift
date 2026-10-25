@@ -201,6 +201,27 @@ struct AddBulbView: View {
                         }
                     }
                 }
+
+                if let failure = matter.pairingError {
+                    Section("Pairing failed") {
+                        Text(failure)
+                            .foregroundStyle(.red)
+                            .textSelection(.enabled)
+                    }
+                }
+
+                if !matter.pairingLog.isEmpty {
+                    Section {
+                        Text(matter.pairingLog.joined(separator: "\n"))
+                            .font(.system(.caption2, design: .monospaced))
+                            .textSelection(.enabled)
+                        Button("Copy log") {
+                            UIPasteboard.general.string = matter.pairingLog.joined(separator: "\n")
+                        }
+                    } header: {
+                        Text("Pairing log")
+                    }
+                }
             }
             .navigationTitle("Add bulb")
             .navigationBarTitleDisplayMode(.inline)
