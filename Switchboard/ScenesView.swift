@@ -1,6 +1,34 @@
 import SwiftUI
 import UIKit
 
+enum Haptics {
+    static func tap() { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
+    static func success() { UINotificationFeedbackGenerator().notificationOccurred(.success) }
+    static func warning() { UINotificationFeedbackGenerator().notificationOccurred(.warning) }
+    static func failure() { UINotificationFeedbackGenerator().notificationOccurred(.error) }
+}
+
+/// A full-width button that visibly presses in and shows a busy or active state.
+private struct ActionButtonStyle: ButtonStyle {
+    var tint: Color = .accentColor
+    var filled = true
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.body.weight(.semibold))
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .foregroundStyle(filled ? Color.white : tint)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(filled ? tint : tint.opacity(0.15))
+            )
+            .opacity(configuration.isPressed ? 0.55 : 1)
+            .scaleEffect(configuration.isPressed ? 0.96 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
 private enum FadeKind: String, CaseIterable, Identifiable {
     case brightness = "Brightness"
     case color = "Color"
@@ -38,9 +66,58 @@ struct ScenesView: View {
         return matter.bulbs.map { $0.nodeID }
     }
 
+    /// Average progress of the fades running on the selected bulbs, or nil when none is running.
+    private var fadeProgress: Double? {
+        let values = targetIDs.compactMap { matter.fadeProgress[$0] }
+        guard !values.isEmpty else { return nil }
+        return values.reduce(0, +) / Double(values.count)
+    }
+
+    private func timeText(_ seconds: Double) -> String {
+        let total = max(0, Int(seconds.rounded()))
+        if total >= 3600 { return String(format: "%d:%02d:%02d", total / 3600, (total / 60) % 60, total % 60) }
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+
     var body: some View {
         NavigationStack {
             Form {
+                if busy || music.isRunning {
+                    Section("Running now") {
+                        if busy {
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Image(systemName: "waveform.path")
+                                        .symbolEffect(.pulse)
+                                    Text(fadeKind == .brightness ? "Brightness fade" : "Color fade")
+                                        .font(.headline)
+                                    Spacer()
+                                    Text(fadeProgress.map { "\(Int($0 * 100))%" } ?? "Starting…")
+                                        .monospacedDigit()
+                                }
+                                ProgressView(value: fadeProgress ?? 0)
+                                if let progress = fadeProgress {
+                                    Text("\(timeText(Double(fadeSeconds) * (1 - progress))) left")
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                        .monospacedDigit()
+                                }
+                            }
+                        }
+                        if music.isRunning {
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Image(systemName: "music.note")
+                                        .symbolEffect(.pulse)
+                                    Text("Music sync listening")
+                                        .font(.headline)
+                                }
+                                ProgressView(value: music.meter)
+                            }
+                        }
+                    }
+                }
+
                 Section("Bulbs") {
                     Picker("Apply to", selection: $target) {
                         Text("All bulbs").tag(UInt64?.none)
@@ -77,10 +154,24 @@ struct ScenesView: View {
                             Text(option.label).tag(option.seconds)
                         }
                     }
-                    Button("Start fade") { startFade() }
-                    Button("Stop fades", role: .destructive) {
-                        matter.stopEffects(targetIDs)
+                    Button {
+                        Haptics.tap()
+                        startFade()
+                    } label: {
+                        Label(busy ? "Fading…" : "Start fade", systemImage: busy ? "hourglass" : "play.fill")
                     }
+                    .buttonStyle(ActionButtonStyle())
+                    .disabled(busy)
+                    .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                    Button {
+                        Haptics.warning()
+                        matter.stopEffects(targetIDs)
+                        message = "Stopping…"
+                    } label: {
+                        Label("Stop fades", systemImage: "stop.fill")
+                    }
+                    .buttonStyle(ActionButtonStyle(tint: .red, filled: false))
+                    .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
                 } header: {
                     Text("Fade between two settings")
                 } footer: {
@@ -100,17 +191,21 @@ struct ScenesView: View {
                         Slider(value: $sensitivity, in: 0.5...2)
                     }
 
-                    Button(music.isRunning ? "Stop music sync" : "Start music sync") {
+                    Button {
+                        Haptics.tap()
                         if music.isRunning {
                             music.stop()
+                            message = "Music sync stopped."
                         } else {
                             music.start(matter: matter, targets: targetIDs, mode: musicMode, sensitivity: sensitivity)
+                            message = "Music sync starting…"
                         }
+                    } label: {
+                        Label(music.isRunning ? "Stop music sync" : "Start music sync",
+                              systemImage: music.isRunning ? "stop.fill" : "music.note")
                     }
-
-                    if music.isRunning {
-                        ProgressView(value: music.meter)
-                    }
+                    .buttonStyle(ActionButtonStyle(tint: music.isRunning ? .red : .accentColor))
+                    .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
                     if !music.note.isEmpty {
                         Text(music.note)
                             .font(.footnote)
@@ -124,25 +219,38 @@ struct ScenesView: View {
 
                 if let message {
                     Section {
-                        Text(message)
+                        Label(message, systemImage: message.hasPrefix("Failed") ? "exclamationmark.triangle.fill" : "info.circle.fill")
                             .font(.footnote)
+                            .foregroundStyle(message.hasPrefix("Failed") ? Color.red : Color.primary)
                     }
                 }
 
                 Section {
-                    Button("Check bulb") {
+                    Button {
+                        Haptics.tap()
                         for id in targetIDs {
                             for line in matter.bulbReport(id) { matter.logActivity(line) }
                         }
+                        message = "Bulb report added to the log below."
+                    } label: {
+                        Label("Check bulb", systemImage: "stethoscope")
                     }
+                    .buttonStyle(ActionButtonStyle(filled: false))
+                    .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
                     if !matter.activity.isEmpty {
-                        Text(matter.activity.suffix(40).joined(separator: "\n"))
+                        Text(matter.activity.suffix(40).reversed().joined(separator: "\n"))
                             .font(.system(.caption2, design: .monospaced))
                             .textSelection(.enabled)
                         Button("Copy log") {
+                            Haptics.success()
                             UIPasteboard.general.string = matter.activity.joined(separator: "\n")
+                            message = "Log copied."
                         }
-                        Button("Clear log", role: .destructive) { matter.clearActivity() }
+                        Button("Clear log", role: .destructive) {
+                            Haptics.warning()
+                            matter.clearActivity()
+                            message = "Log cleared."
+                        }
                     }
                 } header: {
                     Text("Diagnostics")
@@ -172,15 +280,18 @@ struct ScenesView: View {
             return
         }
         busy = true
-        message = "Running…"
+        message = "Fade running. You can leave this screen open; touching a bulb cancels it."
         Task { @MainActor in
             do {
                 try await work(ids)
                 message = success
+                Haptics.success()
             } catch is CancellationError {
                 message = "Stopped."
+                Haptics.warning()
             } catch {
                 message = "Failed: \(error.localizedDescription)"
+                Haptics.failure()
             }
             busy = false
         }

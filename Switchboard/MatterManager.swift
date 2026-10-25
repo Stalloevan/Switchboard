@@ -74,6 +74,10 @@ final class MatterManager: NSObject, ObservableObject {
     var effectGeneration: [UInt64: Int] = [:]
     /// Number of running effects that need the screen to stay on.
     var awakeCount = 0
+    /// Smoothed command round-trip times in seconds, keyed "<node>.<level|color>", learned while fading.
+    var commandLatency: [String: Double] = [:]
+    /// Progress (0...1) of each bulb's running fade, for the UI.
+    @Published var fadeProgress: [UInt64: Double] = [:]
     private static let bulbsKey = "switchboard.bulbs"
     private static let nextNodeKey = "switchboard.nextNodeID"
 

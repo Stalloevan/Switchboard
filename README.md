@@ -10,7 +10,7 @@ A small SwiftUI app that pairs with and controls Matter light bulbs straight fro
 
 ## Scenes (wand icon, top left)
 
-- **Fade:** jump to one brightness or color, then step smoothly to another over 5 seconds to 1 hour. Brightness moves in whole 1% steps; color is blended in many tiny hue/saturation steps. Switchboard drives every step, so the app stays open and the screen stays on while a fade runs. If a fade is shorter than about 10 steps per second allows, the steps get larger instead.
+- **Fade:** jump to one brightness or color, then glide to another over 5 seconds to 1 hour. Switchboard drives the fade on a clock, up to about 20 updates per second per bulb, and aims each command ahead by the bulb's measured reply delay (learned as it runs) so it lands on time. Brightness moves through every level the bulb has (finer than 1%); color uses fine CIE xy steps when the bulb supports them, otherwise hue/saturation. The app stays open and the screen stays on while a fade runs; Scenes shows live progress and time left.
 - **Music sync:** listens through the microphone and drives the bulbs from loudness and bass beats (Pulse, or Color on beat). iOS can't capture another app's audio, so the phone has to hear the music from a speaker. It sends the newest value as fast as each bulb accepts commands.
 
 ## Shortcuts actions

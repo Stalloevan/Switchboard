@@ -89,6 +89,7 @@ struct BulbCard: View {
 
     private var statusText: String {
         if !state.reachable { return "Connecting…" }
+        if let progress = matter.fadeProgress[bulb.nodeID] { return "Fading \(Int(progress * 100))%" }
         return state.isOn ? "On" : "Off"
     }
 
@@ -109,7 +110,10 @@ struct BulbCard: View {
                 Spacer()
                 Toggle("Power", isOn: Binding(
                     get: { state.isOn },
-                    set: { matter.setPower(bulb.nodeID, on: $0) }
+                    set: {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        matter.setPower(bulb.nodeID, on: $0)
+                    }
                 ))
                 .labelsHidden()
                 .disabled(!state.reachable)

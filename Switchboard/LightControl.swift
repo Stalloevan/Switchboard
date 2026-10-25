@@ -327,33 +327,8 @@ extension MatterManager {
         }
     }
 
-    private static func seconds(_ duration: Duration) -> Double {
+    static func seconds(_ duration: Duration) -> Double {
         Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
-    }
-
-    /// Calls `send(index, stepTime)` for step 1...steps, each at its scheduled moment.
-    /// Driven by the clock rather than by command completion, so a slow bulb skips steps instead of drifting.
-    @MainActor
-    private func runSteps(_ nodeID: UInt64,
-                          generation: Int,
-                          duration: Double,
-                          steps: Int,
-                          send: (_ index: Int, _ stepTime: Double) async throws -> Void) async throws {
-        let stepTime = duration / Double(steps)
-        let clock = ContinuousClock()
-        let start = clock.now
-        var lastIndex = 0
-        while true {
-            guard effectGeneration[nodeID] == generation else { throw CancellationError() }
-            let elapsed = Self.seconds(start.duration(to: clock.now))
-            let index = min(steps, Int(elapsed / stepTime) + 1)
-            if index != lastIndex {
-                lastIndex = index
-                try await send(index, stepTime)
-            }
-            if elapsed >= duration { return }
-            try await Task.sleep(nanoseconds: 20_000_000)
-        }
     }
 
     // MARK: Effects
@@ -382,8 +357,115 @@ extension MatterManager {
         return "\(ns.domain) \(ns.code): \(ns.localizedDescription)"
     }
 
-    /// Fades brightness in whole 1% steps. If the time is too short to send a command per percent
-    /// (more than about 10 per second), the steps get larger instead.
+    // MARK: Fade engine
+
+    func latency(_ nodeID: UInt64, kind: String) -> Double {
+        commandLatency["\(nodeID).\(kind)"] ?? (kind == "level" ? 0.10 : 0.045)
+    }
+
+    func recordLatency(_ nodeID: UInt64, kind: String, seconds: Double) {
+        let key = "\(nodeID).\(kind)"
+        let old = commandLatency[key] ?? seconds
+        commandLatency[key] = old * 0.8 + seconds * 0.2
+    }
+
+    func colorSupportsXY(_ nodeID: UInt64) -> Bool {
+        guard let device = devices[nodeID],
+              let cluster = MTRClusterColorControl(device: device, endpointID: endpoint, queue: .main),
+              let caps = Self.valueOf(cluster.readAttributeColorCapabilities(with: nil)) else { return false }
+        return (caps.intValue & 0x08) != 0
+    }
+
+    func lightXY(_ nodeID: UInt64,
+                 x: Double,
+                 y: Double,
+                 seconds: Double,
+                 completion: @escaping ((any Error)?) -> Void) {
+        guard let device = devices[nodeID],
+              let cluster = MTRClusterColorControl(device: device, endpointID: endpoint, queue: .main) else {
+            completion(LightError.unknownBulb)
+            return
+        }
+        let params = MTRColorControlClusterMoveToColorParams()
+        params.colorX = NSNumber(value: min(max(Int((x * 65536).rounded()), 0), 65279))
+        params.colorY = NSNumber(value: min(max(Int((y * 65536).rounded()), 0), 65279))
+        params.transitionTime = Self.deciseconds(seconds)
+        params.optionsMask = NSNumber(value: 1)
+        params.optionsOverride = NSNumber(value: 1)
+        cluster.moveToColor(with: params, expectedValues: nil, expectedValueInterval: nil, completion: completion)
+    }
+
+    /// Drives one fade on a clock. Each tick it works out where the fade will be by the time the command
+    /// has reached the bulb (half the measured round trip) plus the bulb's own glide, sends that, and
+    /// never waits for the answer, so slow replies can't stall the motion. At most two commands per bulb
+    /// are in flight; ticks beyond that are skipped and the next one carries the newest value.
+    /// `send(time, done)` returns false when the new value is identical to the last one (nothing sent).
+    @MainActor
+    private func runFade(_ nodeID: UInt64,
+                         generation: Int,
+                         duration: Double,
+                         tick: Double,
+                         kind: String,
+                         counters: FadeCounters,
+                         send: (_ time: Double, _ done: @escaping ((any Error)?) -> Void) -> Bool) async throws {
+        let clock = ContinuousClock()
+        let start = clock.now
+        var nextTick = start
+        var lastPublish = -1.0
+        defer { fadeProgress[nodeID] = nil }
+        while true {
+            guard effectGeneration[nodeID] == generation else { throw CancellationError() }
+            let elapsed = Self.seconds(start.duration(to: clock.now))
+            if elapsed >= duration { break }
+            if counters.consecutiveFailures >= 5, let error = counters.lastError { throw error }
+            if elapsed - lastPublish >= 0.2 {
+                lastPublish = elapsed
+                fadeProgress[nodeID] = elapsed / duration
+            }
+            if counters.inFlight < 2 {
+                let began = clock.now
+                let lead = latency(nodeID, kind: kind) / 2
+                counters.inFlight += 1
+                let issued = send(elapsed + lead) { [self] error in
+                    counters.inFlight -= 1
+                    if let error {
+                        counters.failed += 1
+                        counters.consecutiveFailures += 1
+                        counters.lastError = error
+                        if counters.failed <= 3 {
+                            logActivity("  command failed: \(Self.describe(error))")
+                        }
+                    } else {
+                        counters.succeeded += 1
+                        counters.consecutiveFailures = 0
+                        let rtt = Self.seconds(began.duration(to: clock.now))
+                        counters.totalRTT += rtt
+                        recordLatency(nodeID, kind: kind, seconds: rtt)
+                    }
+                }
+                if issued {
+                    counters.sent += 1
+                } else {
+                    counters.inFlight -= 1
+                }
+            } else {
+                counters.skipped += 1
+            }
+            nextTick = nextTick.advanced(by: .seconds(tick))
+            let now = clock.now
+            if nextTick < now { nextTick = now }
+            try await clock.sleep(until: nextTick)
+        }
+    }
+
+    private func logFadeSummary(_ name: String, _ counters: FadeCounters, nodeID: UInt64, kind: String) {
+        let average = counters.succeeded > 0 ? Int(counters.totalRTT / Double(counters.succeeded) * 1000) : 0
+        logActivity("\(name) finished: \(counters.sent) commands, \(counters.failed) failed, \(counters.skipped) ticks skipped while waiting, average reply \(average) ms, learned delay \(Int(latency(nodeID, kind: kind) * 1000)) ms")
+    }
+
+    /// Fades brightness through every level the bulb has (about 2.5 per percent, so finer than 1% steps).
+    /// Each command glides for about the time until the next level change, and is sent early by the bulb's
+    /// measured delay so the motion lands on time.
     @MainActor
     func fadeBrightness(_ nodeID: UInt64, from: Double, to: Double, seconds: Double) async throws {
         let startPercent = min(max(from, 1), 100)
@@ -394,44 +476,39 @@ extension MatterManager {
         defer { releaseScreenAwake() }
 
         let span = endPercent - startPercent
-        let steps = max(1, min(Int(abs(span).rounded()), Int(duration / 0.1)))
-        logActivity("Fade \(Int(startPercent))% to \(Int(endPercent))% over \(Int(duration)) s: \(steps) steps")
+        let levels = max(1, Int((abs(span) / 100 * 253).rounded()))
+        let glide = min(max(duration / Double(levels), 0.1), 3.0)
+        let tick = 0.06
+        logActivity("Brightness fade \(Int(startPercent))% to \(Int(endPercent))% over \(Int(duration)) s: \(levels) level changes, glide \(String(format: "%.1f", glide)) s, aiming \(Int(latency(nodeID, kind: "level") * 500)) ms ahead")
 
-        // Same opening move as the earlier version that worked: set the start level and turn on in one command.
         try await applyLevel(nodeID, percent: startPercent, seconds: 0, withOnOff: startPercent > 1)
         if startPercent <= 1 { try await applyPower(nodeID, on: true) }
         guard abs(span) >= 0.5 else { return }
 
-        var failures = 0
-        var sent = 0
-        var dropped = 0
-        var totalMs = 0.0
-        try await runSteps(nodeID, generation: generation, duration: duration, steps: steps) { index, stepTime in
-            let value = (startPercent + span * Double(index) / Double(steps)).rounded()
-            let began = Date()
-            do {
-                // Each step glides for exactly one step's time, so the motion is continuous.
-                try await self.applyLevel(nodeID, percent: value, seconds: stepTime, withOnOff: value > 1)
-                failures = 0
-                sent += 1
-                totalMs += Date().timeIntervalSince(began) * 1000
-                if sent <= 3 {
-                    self.logActivity("  step \(index)/\(steps) to \(Int(value))%: ok in \(Int(Date().timeIntervalSince(began) * 1000)) ms")
-                }
-            } catch {
-                failures += 1
-                dropped += 1
-                self.logActivity("  step \(index)/\(steps) FAILED: \(Self.describe(error))")
-                // One dropped command shouldn't end the fade; several in a row mean the bulb isn't answering.
-                if failures >= 3 { throw error }
-            }
+        let counters = FadeCounters()
+        var lastRaw = Self.levelValue(startPercent).intValue
+        try await runFade(nodeID, generation: generation, duration: duration, tick: tick, kind: "level", counters: counters) { time, done in
+            let t = min(duration, time + glide)
+            let value = startPercent + span * t / duration
+            let raw = MatterManager.levelValue(value).intValue
+            if raw == lastRaw { return false }
+            lastRaw = raw
+            self.lightLevel(nodeID, percent: value, seconds: glide, withOnOff: value > 1, completion: done)
+            return true
         }
-        let average = sent > 0 ? Int(totalMs / Double(sent)) : 0
-        logActivity("Fade finished: \(sent) steps sent, \(dropped) failed, average \(average) ms per command")
+
+        // Land exactly on the target, retrying once if that last command is dropped.
+        do {
+            try await applyLevel(nodeID, percent: endPercent, seconds: 0, withOnOff: endPercent > 1)
+        } catch {
+            try await applyLevel(nodeID, percent: endPercent, seconds: 0, withOnOff: endPercent > 1)
+        }
+        logFadeSummary("Brightness fade", counters, nodeID: nodeID, kind: "level")
     }
 
-    /// Fades between two colors by sending many small hue/saturation steps (the bulb's own color
-    /// transition is skipped because many bulbs just jump). Hue takes the shortest way round the color wheel.
+    /// Fades between two colors with up to about 20 tiny steps per second. Where the bulb supports CIE xy
+    /// color it uses that (65,000 values per axis instead of 254, so no visible banding); otherwise it
+    /// falls back to hue and saturation. The path follows the shortest way round the color wheel.
     @MainActor
     func fadeColor(_ nodeID: UInt64, from: LightColor, to: LightColor, seconds: Double) async throws {
         let duration = min(max(seconds, 0.5), 7200)
@@ -448,47 +525,60 @@ extension MatterManager {
         if hueDelta > 0.5 { hueDelta -= 1 }
         if hueDelta < -0.5 { hueDelta += 1 }
         let saturationDelta = b.saturation - a.saturation
+        let startHue = a.hue
+        let startSaturation = a.saturation
 
-        // The bulb only has 254 hue and saturation values, so more steps than that would be wasted.
-        let distinct = Int((max(abs(hueDelta), abs(saturationDelta)) * 254).rounded(.up))
-        let steps = max(1, min(distinct, Int(duration / 0.1)))
-        logActivity("Color fade over \(Int(duration)) s: \(steps) steps (hue change \(Int(abs(hueDelta) * 360))°)")
+        let state = ColorFadeState()
+        state.xy = colorSupportsXY(nodeID)
+        let glide = 0.1
+        let tick = 0.05
+        logActivity("Color fade over \(Int(duration)) s: \(state.xy ? "fine xy color" : "hue and saturation") steps, hue change \(Int(abs(hueDelta) * 360))°, aiming \(Int(latency(nodeID, kind: "color") * 500)) ms ahead")
 
         try await applyColor(nodeID, from, seconds: 0)
         try await applyPower(nodeID, on: true)
 
-        var failures = 0
-        var sent = 0
-        var dropped = 0
-        var totalMs = 0.0
-        try await runSteps(nodeID, generation: generation, duration: duration, steps: steps) { index, stepTime in
-            let progress = Double(index) / Double(steps)
-            var hue = (a.hue + hueDelta * progress).truncatingRemainder(dividingBy: 1)
+        let counters = FadeCounters()
+        try await runFade(nodeID, generation: generation, duration: duration, tick: tick, kind: "color", counters: counters) { time, done in
+            let t = min(duration, time + glide)
+            let progress = t / duration
+            var hue = (startHue + hueDelta * progress).truncatingRemainder(dividingBy: 1)
             if hue < 0 { hue += 1 }
-            let saturation = min(max(a.saturation + saturationDelta * progress, 0), 1)
-            let began = Date()
-            do {
-                try await self.applyColor(nodeID, .hueSat(hue: hue, saturation: saturation), seconds: stepTime)
-                failures = 0
-                sent += 1
-                totalMs += Date().timeIntervalSince(began) * 1000
-                if sent <= 3 {
-                    self.logActivity("  step \(index)/\(steps): ok in \(Int(Date().timeIntervalSince(began) * 1000)) ms")
-                }
-            } catch {
-                failures += 1
-                dropped += 1
-                self.logActivity("  step \(index)/\(steps) FAILED: \(Self.describe(error))")
-                if failures >= 3 { throw error }
+            let saturation = min(max(startSaturation + saturationDelta * progress, 0), 1)
+
+            // If the very first xy commands are refused, switch to hue/saturation for the rest of the fade.
+            if state.xy && counters.succeeded == 0 && counters.consecutiveFailures >= 3 {
+                state.xy = false
+                state.lastA = -1
+                state.lastB = -1
+                counters.consecutiveFailures = 0
+                self.logActivity("  xy color refused, switching to hue and saturation")
             }
+            if state.xy {
+                let (x, y) = MatterManager.xy(hue: hue, saturation: saturation)
+                let kx = Int((x * 65536).rounded())
+                let ky = Int((y * 65536).rounded())
+                if kx == state.lastA && ky == state.lastB { return false }
+                state.lastA = kx
+                state.lastB = ky
+                self.lightXY(nodeID, x: x, y: y, seconds: glide, completion: done)
+            } else {
+                let kh = Int((hue * 254).rounded())
+                let ks = Int((saturation * 254).rounded())
+                if kh == state.lastA && ks == state.lastB { return false }
+                state.lastA = kh
+                state.lastB = ks
+                self.lightHueSat(nodeID, hue: hue, saturation: saturation, seconds: glide, completion: done)
+            }
+            return true
         }
 
         // Finish on the exact target; a white ends on the bulb's real white LEDs.
-        if case .kelvin = to {
+        do {
+            try await applyColor(nodeID, to, seconds: 0)
+        } catch {
             try await applyColor(nodeID, to, seconds: 0)
         }
-        let average = sent > 0 ? Int(totalMs / Double(sent)) : 0
-        logActivity("Color fade finished: \(sent) steps sent, \(dropped) failed, average \(average) ms per command")
+        logFadeSummary("Color fade", counters, nodeID: nodeID, kind: "color")
     }
 
     // MARK: Bulb report
@@ -543,4 +633,22 @@ extension MatterManager {
         }
         return lines
     }
+}
+
+/// Bookkeeping for one running fade (a class so completion handlers can update it).
+final class FadeCounters {
+    var inFlight = 0
+    var sent = 0
+    var succeeded = 0
+    var failed = 0
+    var consecutiveFailures = 0
+    var skipped = 0
+    var totalRTT = 0.0
+    var lastError: Error?
+}
+
+final class ColorFadeState {
+    var xy = false
+    var lastA = -1
+    var lastB = -1
 }
