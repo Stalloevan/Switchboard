@@ -57,7 +57,7 @@ final class MatterManager: NSObject, ObservableObject {
     private let storage = MatterStorage()
     private var rootKeypair: RootKeypair?
     private var controller: MTRDeviceController?
-    private var devices: [UInt64: MTRDevice] = [:]
+    var devices: [UInt64: MTRDevice] = [:]
     private var nodeIDs: [ObjectIdentifier: UInt64] = [:]
     private var pending: PendingBulb?
     private var pairingTimeout: DispatchWorkItem?
@@ -66,9 +66,12 @@ final class MatterManager: NSObject, ObservableObject {
     private var debounced: [String: DispatchWorkItem] = [:]
     private var localEdits: [String: Date] = [:]
 
-    private let endpoint = NSNumber(value: 1)
+    let endpoint = NSNumber(value: 1)
     private static let bulbsKey = "switchboard.bulbs"
     private static let nextNodeKey = "switchboard.nextNodeID"
+
+    /// One shared controller for the app and for Shortcuts actions that run without the UI.
+    static let shared = MatterManager()
 
     override init() {
         super.init()
@@ -409,7 +412,7 @@ final class MatterManager: NSObject, ObservableObject {
 
     // MARK: Persistence
 
-    private static func loadBulbs() -> [Bulb] {
+    static func loadBulbs() -> [Bulb] {
         guard let data = UserDefaults.standard.data(forKey: bulbsKey),
               let decoded = try? JSONDecoder().decode([Bulb].self, from: data) else { return [] }
         return decoded

@@ -28,6 +28,9 @@ targets:
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         ITSAppUsesNonExemptEncryption: false
+        NSMicrophoneUsageDescription: Switchboard listens through the microphone to sync your lights to music. Audio is analyzed on the phone and never recorded or sent anywhere.
+        UIBackgroundModes:
+          - audio
         NSBluetoothAlwaysUsageDescription: Switchboard uses Bluetooth to pair new Matter bulbs.
         NSLocalNetworkUsageDescription: Switchboard talks to your Matter bulbs over your home Wi-Fi network.
         NSBonjourServices:

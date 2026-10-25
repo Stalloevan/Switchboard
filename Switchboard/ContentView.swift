@@ -5,6 +5,7 @@ struct ContentView: View {
     @EnvironmentObject private var matter: MatterManager
     @Environment(\.scenePhase) private var scenePhase
     @State private var showingAdd = false
+    @State private var showingScenes = false
 
     var body: some View {
         NavigationStack {
@@ -22,6 +23,14 @@ struct ContentView: View {
             .background(Color(.systemGroupedBackground))
             .navigationTitle("Switchboard")
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        showingScenes = true
+                    } label: {
+                        Image(systemName: "wand.and.stars")
+                    }
+                    .disabled(matter.bulbs.isEmpty || !matter.isReady)
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         showingAdd = true
@@ -30,6 +39,10 @@ struct ContentView: View {
                     }
                     .disabled(!matter.isReady)
                 }
+            }
+            .sheet(isPresented: $showingScenes) {
+                ScenesView()
+                    .environmentObject(matter)
             }
             .sheet(isPresented: $showingAdd) {
                 AddBulbView()
