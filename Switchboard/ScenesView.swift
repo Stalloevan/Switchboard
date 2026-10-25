@@ -14,7 +14,6 @@ struct ScenesView: View {
     @StateObject private var music = MusicSync()
 
     @State private var target: UInt64?
-    @State private var sunriseMinutes = 15
 
     @State private var fadeKind = FadeKind.brightness
     @State private var fromPercent = 100.0
@@ -29,7 +28,6 @@ struct ScenesView: View {
     @State private var message: String?
     @State private var busy = false
 
-    private let sunriseOptions = [1, 5, 10, 15, 20, 30, 45, 60, 90]
     private let fadeOptions: [(seconds: Int, label: String)] = [
         (5, "5 seconds"), (10, "10 seconds"), (30, "30 seconds"), (60, "1 minute"),
         (120, "2 minutes"), (300, "5 minutes"), (600, "10 minutes"), (1800, "30 minutes"), (3600, "1 hour")
@@ -50,20 +48,6 @@ struct ScenesView: View {
                             Text(bulb.name).tag(UInt64?.some(bulb.nodeID))
                         }
                     }
-                }
-
-                Section {
-                    Picker("Duration", selection: $sunriseMinutes) {
-                        ForEach(sunriseOptions, id: \.self) { minutes in
-                            Text("\(minutes) min").tag(minutes)
-                        }
-                    }
-                    Button("Start sunrise") { startSunrise() }
-                        .disabled(busy)
-                } header: {
-                    Text("Sunrise")
-                } footer: {
-                    Text("Starts very dim and warm, then slowly brightens. The bulb runs the whole ramp itself, so it continues even if you close the app. For a wake-up light, use the Sunrise action in a Shortcuts time-of-day automation.")
                 }
 
                 Section {
@@ -94,11 +78,13 @@ struct ScenesView: View {
                         }
                     }
                     Button("Start fade") { startFade() }
-                        .disabled(busy)
+                    Button("Stop fades", role: .destructive) {
+                        matter.stopEffects(targetIDs)
+                    }
                 } header: {
                     Text("Fade between two settings")
                 } footer: {
-                    Text("Jumps to the first setting, then moves smoothly to the second. The same actions are in Shortcuts.")
+                    Text("Jumps to the first setting, then steps smoothly to the second: brightness in 1% steps, color in many tiny hue steps. Switchboard drives every step, so keep the app open; the screen stays on during a fade. Touching a bulb's controls cancels its fade.")
                 }
 
                 Section {
@@ -165,25 +151,17 @@ struct ScenesView: View {
             return
         }
         busy = true
-        message = nil
+        message = "Running…"
         Task { @MainActor in
             do {
                 try await work(ids)
                 message = success
+            } catch is CancellationError {
+                message = "Stopped."
             } catch {
                 message = "Failed: \(error.localizedDescription)"
             }
             busy = false
-        }
-    }
-
-    private func startSunrise() {
-        let minutes = Double(sunriseMinutes)
-        let manager = matter
-        run("Sunrise started. It will reach full brightness in \(sunriseMinutes) min.") { ids in
-            try await manager.forEachBulb(ids) { id in
-                try await manager.sunrise(id, minutes: minutes)
-            }
         }
     }
 
@@ -194,7 +172,7 @@ struct ScenesView: View {
         case .brightness:
             let from = fromPercent
             let to = toPercent
-            run("Fading from \(Int(from))% to \(Int(to))%.") { ids in
+            run("Brightness fade finished.") { ids in
                 try await manager.forEachBulb(ids) { id in
                     try await manager.fadeBrightness(id, from: from, to: to, seconds: seconds)
                 }
@@ -202,7 +180,7 @@ struct ScenesView: View {
         case .color:
             let from = LightColor.from(UIColor(fromColor))
             let to = LightColor.from(UIColor(toColor))
-            run("Fading between the two colors.") { ids in
+            run("Color fade finished.") { ids in
                 try await manager.forEachBulb(ids) { id in
                     try await manager.fadeColor(id, from: from, to: to, seconds: seconds)
                 }

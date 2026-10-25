@@ -127,6 +127,7 @@ struct TurnBulbIntent: AppIntent {
     func perform() async throws -> some IntentResult {
         let ids = try await prepareBulbs(bulb)
         let turnOn = on
+        MatterManager.shared.stopEffects(ids)
         try await MatterManager.shared.forEachBulb(ids) { id in
             try await MatterManager.shared.applyPower(id, on: turnOn)
         }
@@ -136,19 +137,17 @@ struct TurnBulbIntent: AppIntent {
 
 struct SetBrightnessIntent: AppIntent {
     static let title: LocalizedStringResource = "Set Brightness"
-    static let description = IntentDescription("Sets a bulb's brightness from 1 to 100 percent (0 turns it off), optionally fading over some seconds.")
+    static let description = IntentDescription("Sets a bulb's brightness from 1 to 100 percent. 0 turns it off.")
 
     @Parameter(title: "Bulb") var bulb: BulbEntity?
     @Parameter(title: "Brightness (%)", default: 100) var percent: Int
-    @Parameter(title: "Fade time (seconds)", default: 0) var seconds: Int
 
     @MainActor
     func perform() async throws -> some IntentResult {
         let ids = try await prepareBulbs(bulb)
         let level = Double(percent)
-        let fade = Double(seconds)
         try await MatterManager.shared.forEachBulb(ids) { id in
-            try await MatterManager.shared.setBrightness(id, percent: level, seconds: fade)
+            try await MatterManager.shared.setBrightness(id, percent: level)
         }
         return .result()
     }
@@ -156,20 +155,18 @@ struct SetBrightnessIntent: AppIntent {
 
 struct SetColorIntent: AppIntent {
     static let title: LocalizedStringResource = "Set Color"
-    static let description = IntentDescription("Sets a bulb to a named color or white, or to a custom hex color, optionally fading over some seconds.")
+    static let description = IntentDescription("Sets a bulb to a named color or white, or to a custom hex color.")
 
     @Parameter(title: "Bulb") var bulb: BulbEntity?
     @Parameter(title: "Color", default: .warmWhite) var color: ColorChoice
     @Parameter(title: "Custom hex color (overrides Color)") var hex: String?
-    @Parameter(title: "Fade time (seconds)", default: 0) var seconds: Int
 
     @MainActor
     func perform() async throws -> some IntentResult {
         let target = try resolveColor(color, hex: hex)
         let ids = try await prepareBulbs(bulb)
-        let fade = Double(seconds)
         try await MatterManager.shared.forEachBulb(ids) { id in
-            try await MatterManager.shared.setColor(id, color: target, seconds: fade)
+            try await MatterManager.shared.setColor(id, color: target)
         }
         return .result()
     }
@@ -177,7 +174,8 @@ struct SetColorIntent: AppIntent {
 
 struct FadeBrightnessIntent: AppIntent {
     static let title: LocalizedStringResource = "Fade Between Brightness Levels"
-    static let description = IntentDescription("Jumps to the first brightness, then smoothly changes to the second over the chosen time (up to about 109 minutes).")
+    static let openAppWhenRun: Bool = true
+    static let description = IntentDescription("Jumps to the first brightness, then changes to the second in 1% steps over the chosen time. Switchboard opens and stays on screen until the fade finishes.")
 
     @Parameter(title: "Bulb") var bulb: BulbEntity?
     @Parameter(title: "From brightness (%)", default: 100) var fromPercent: Int
@@ -199,7 +197,8 @@ struct FadeBrightnessIntent: AppIntent {
 
 struct FadeColorIntent: AppIntent {
     static let title: LocalizedStringResource = "Fade Between Two Colors"
-    static let description = IntentDescription("Jumps to the first color, then smoothly changes to the second over the chosen time (up to about 109 minutes). Fading between a color and a white may jump instead of blend.")
+    static let openAppWhenRun: Bool = true
+    static let description = IntentDescription("Jumps to the first color, then blends to the second in many small steps over the chosen time. Switchboard opens and stays on screen until the fade finishes.")
 
     @Parameter(title: "Bulb") var bulb: BulbEntity?
     @Parameter(title: "From color", default: .red) var fromColor: ColorChoice
@@ -216,24 +215,6 @@ struct FadeColorIntent: AppIntent {
         let duration = Double(seconds)
         try await MatterManager.shared.forEachBulb(ids) { id in
             try await MatterManager.shared.fadeColor(id, from: from, to: to, seconds: duration)
-        }
-        return .result()
-    }
-}
-
-struct SunriseIntent: AppIntent {
-    static let title: LocalizedStringResource = "Sunrise"
-    static let description = IntentDescription("Starts the bulb very dim and warm, then slowly brightens it over the chosen number of minutes (up to 109). Pair it with a time-of-day automation to use it as a wake-up light.")
-
-    @Parameter(title: "Bulb") var bulb: BulbEntity?
-    @Parameter(title: "Duration (minutes)", default: 15) var minutes: Int
-
-    @MainActor
-    func perform() async throws -> some IntentResult {
-        let ids = try await prepareBulbs(bulb)
-        let length = Double(minutes)
-        try await MatterManager.shared.forEachBulb(ids) { id in
-            try await MatterManager.shared.sunrise(id, minutes: length)
         }
         return .result()
     }

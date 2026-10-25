@@ -10,24 +10,20 @@ A small SwiftUI app that pairs with and controls Matter light bulbs straight fro
 
 ## Scenes (wand icon, top left)
 
-- **Sunrise:** starts very dim and warm, then brightens (and cools slightly) over 1 to 90 minutes. The bulb runs the ramp itself, so it keeps going if the app is closed.
-- **Fade:** jump to one brightness or color, then glide to another over 5 seconds to 1 hour.
-- **Music sync:** listens through the microphone and drives the bulbs from loudness and bass beats (Pulse, or Color on beat). iOS can't capture another app's audio, so the phone has to hear the music from a speaker. Keep the screen on; changes are rate-limited to about 7 per second per bulb.
+- **Fade:** jump to one brightness or color, then step smoothly to another over 5 seconds to 1 hour. Brightness moves in whole 1% steps; color is blended in many tiny hue/saturation steps. Switchboard drives every step, so the app stays open and the screen stays on while a fade runs. If a fade is shorter than about 10 steps per second allows, the steps get larger instead.
+- **Music sync:** listens through the microphone and drives the bulbs from loudness and bass beats (Pulse, or Color on beat). iOS can't capture another app's audio, so the phone has to hear the music from a speaker. It sends the newest value as fast as each bulb accepts commands.
 
 ## Shortcuts actions
 
 Open the Shortcuts app, add an action, and search for Switchboard:
 
 - Turn Bulb On or Off
-- Set Brightness (percent, optional fade time)
-- Set Color (named color, white temperature, or custom hex, optional fade time)
+- Set Brightness (percent)
+- Set Color (named color, white temperature, or custom hex)
 - Fade Between Brightness Levels (from, to, duration)
 - Fade Between Two Colors (from, to, duration)
-- Sunrise (duration in minutes)
 
-Leave "Bulb" empty to affect all bulbs. For a wake-up light, create a time-of-day Automation that runs the Sunrise action.
-
-Transitions are limited by Matter to about 109 minutes. Fading between a color and a white may jump rather than blend.
+Leave "Bulb" empty to affect all bulbs. The two fade actions open Switchboard and keep it on screen until the fade finishes.
 
 ## Pairing a bulb
 

@@ -16,6 +16,42 @@ enum LightColor {
         return .hueSat(hue: Double(h), saturation: Double(s))
     }
 
+    /// Hue and saturation (0...1) for blending. White temperatures are approximated with their RGB color.
+    var hueSaturation: (hue: Double, saturation: Double) {
+        switch self {
+        case .hueSat(let hue, let saturation):
+            return (hue, saturation)
+        case .kelvin(let kelvin):
+            let rgb = LightColor.rgb(forKelvin: kelvin)
+            var h: CGFloat = 0
+            var s: CGFloat = 0
+            var b: CGFloat = 0
+            var a: CGFloat = 0
+            UIColor(red: CGFloat(rgb.0), green: CGFloat(rgb.1), blue: CGFloat(rgb.2), alpha: 1)
+                .getHue(&h, saturation: &s, brightness: &b, alpha: &a)
+            return (Double(h), Double(s))
+        }
+    }
+
+    /// Approximate RGB (0...1) of a black-body white, good enough for blending.
+    static func rgb(forKelvin kelvin: Double) -> (Double, Double, Double) {
+        let t = min(max(kelvin, 1000), 40000) / 100
+        let red = t <= 66 ? 255 : 329.698727446 * pow(t - 60, -0.1332047592)
+        let green = t <= 66
+            ? 99.4708025861 * log(t) - 161.1195681661
+            : 288.1221695283 * pow(t - 60, -0.0755148492)
+        let blue: Double
+        if t >= 66 {
+            blue = 255
+        } else if t <= 19 {
+            blue = 0
+        } else {
+            blue = 138.5177312231 * log(t - 10) - 305.0447927307
+        }
+        func unit(_ v: Double) -> Double { min(max(v, 0), 255) / 255 }
+        return (unit(red), unit(green), unit(blue))
+    }
+
     /// Parses "#RRGGBB" or "RRGGBB".
     static func hex(_ text: String) -> LightColor? {
         var t = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -225,7 +261,7 @@ extension MatterManager {
     }
 
     @MainActor
-    func applyLevel(_ nodeID: UInt64, percent: Double, seconds: Double = 0, withOnOff: Bool = true) async throws {
+    func applyLevel(_ nodeID: UInt64, percent: Double, seconds: Double = 0, withOnOff: Bool = false) async throws {
         try await run { done in
             self.lightLevel(nodeID, percent: percent, seconds: seconds, withOnOff: withOnOff, completion: done)
         }
@@ -264,45 +300,144 @@ extension MatterManager {
         if let firstError { throw firstError }
     }
 
-    // MARK: Effects
+    // MARK: Effect bookkeeping
 
-    /// Starts very dim and warm, then brightens (and cools slightly) over `minutes`.
-    /// The ramp is a single timed command, so it keeps running if the app is closed.
-    @MainActor
-    func sunrise(_ nodeID: UInt64, minutes: Double) async throws {
-        let seconds = min(max(minutes * 60, 1), 6500)
-        try await applyLevel(nodeID, percent: 1, seconds: 0, withOnOff: true)
-        // Bulbs without adjustable white just skip the color part.
-        _ = try? await applyColor(nodeID, .kelvin(1000), seconds: 0)
-        _ = try? await applyColor(nodeID, .kelvin(4000), seconds: seconds)
-        try await applyLevel(nodeID, percent: 100, seconds: seconds, withOnOff: true)
+    /// Cancels any fade running on these bulbs.
+    func stopEffects(_ nodeIDs: [UInt64]) {
+        for id in nodeIDs {
+            effectGeneration[id, default: 0] += 1
+        }
     }
 
+    func beginEffect(_ nodeID: UInt64) -> Int {
+        let next = (effectGeneration[nodeID] ?? 0) + 1
+        effectGeneration[nodeID] = next
+        return next
+    }
+
+    func holdScreenAwake() {
+        awakeCount += 1
+        UIApplication.shared.isIdleTimerDisabled = true
+    }
+
+    func releaseScreenAwake() {
+        awakeCount = max(0, awakeCount - 1)
+        if awakeCount == 0 {
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
+    }
+
+    private static func seconds(_ duration: Duration) -> Double {
+        Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
+    }
+
+    /// Calls `send(index, stepTime)` for step 1...steps, each at its scheduled moment.
+    /// Driven by the clock rather than by command completion, so a slow bulb skips steps instead of drifting.
     @MainActor
-    func setBrightness(_ nodeID: UInt64, percent: Double, seconds: Double) async throws {
+    private func runSteps(_ nodeID: UInt64,
+                          generation: Int,
+                          duration: Double,
+                          steps: Int,
+                          send: (_ index: Int, _ stepTime: Double) async throws -> Void) async throws {
+        let stepTime = duration / Double(steps)
+        let clock = ContinuousClock()
+        let start = clock.now
+        var lastIndex = 0
+        while true {
+            guard effectGeneration[nodeID] == generation else { throw CancellationError() }
+            let elapsed = Self.seconds(start.duration(to: clock.now))
+            let index = min(steps, Int(elapsed / stepTime) + 1)
+            if index != lastIndex {
+                lastIndex = index
+                try await send(index, stepTime)
+            }
+            if elapsed >= duration { return }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
+    // MARK: Effects
+
+    /// Sets brightness instantly (0 turns the bulb off).
+    @MainActor
+    func setBrightness(_ nodeID: UInt64, percent: Double) async throws {
+        stopEffects([nodeID])
         if percent <= 0 {
             try await applyPower(nodeID, on: false)
         } else {
-            try await applyLevel(nodeID, percent: percent, seconds: seconds, withOnOff: true)
+            try await applyLevel(nodeID, percent: percent, seconds: 0, withOnOff: false)
+            try await applyPower(nodeID, on: true)
         }
     }
 
     @MainActor
-    func setColor(_ nodeID: UInt64, color: LightColor, seconds: Double) async throws {
-        try await applyColor(nodeID, color, seconds: seconds)
+    func setColor(_ nodeID: UInt64, color: LightColor) async throws {
+        stopEffects([nodeID])
+        try await applyColor(nodeID, color, seconds: 0)
         try await applyPower(nodeID, on: true)
     }
 
+    /// Fades brightness in whole 1% steps. If the time is too short to send a command per percent
+    /// (more than about 10 per second), the steps get larger instead.
     @MainActor
     func fadeBrightness(_ nodeID: UInt64, from: Double, to: Double, seconds: Double) async throws {
-        try await applyLevel(nodeID, percent: from, seconds: 0, withOnOff: true)
-        try await applyLevel(nodeID, percent: to, seconds: seconds, withOnOff: true)
+        let startPercent = min(max(from, 1), 100)
+        let endPercent = min(max(to, 1), 100)
+        let duration = min(max(seconds, 0.5), 7200)
+        let generation = beginEffect(nodeID)
+        holdScreenAwake()
+        defer { releaseScreenAwake() }
+
+        try await applyLevel(nodeID, percent: startPercent, seconds: 0, withOnOff: false)
+        try await applyPower(nodeID, on: true)
+
+        let span = endPercent - startPercent
+        guard abs(span) >= 0.5 else { return }
+
+        let steps = max(1, min(Int(abs(span).rounded()), Int(duration / 0.1)))
+        try await runSteps(nodeID, generation: generation, duration: duration, steps: steps) { index, stepTime in
+            let value = startPercent + span * Double(index) / Double(steps)
+            // Each step glides for exactly one step's time, so the motion is continuous.
+            try await self.applyLevel(nodeID, percent: value.rounded(), seconds: stepTime, withOnOff: false)
+        }
     }
 
+    /// Fades between two colors by sending many small hue/saturation steps (the bulb's own color
+    /// transition is skipped because many bulbs just jump). Hue takes the shortest way round the color wheel.
     @MainActor
     func fadeColor(_ nodeID: UInt64, from: LightColor, to: LightColor, seconds: Double) async throws {
+        let duration = min(max(seconds, 0.5), 7200)
+        let generation = beginEffect(nodeID)
+        holdScreenAwake()
+        defer { releaseScreenAwake() }
+
+        var a = from.hueSaturation
+        var b = to.hueSaturation
+        // A white has no real hue, so borrow the other end's hue and only change saturation.
+        if a.saturation < 0.05 { a.hue = b.hue }
+        if b.saturation < 0.05 { b.hue = a.hue }
+        var hueDelta = b.hue - a.hue
+        if hueDelta > 0.5 { hueDelta -= 1 }
+        if hueDelta < -0.5 { hueDelta += 1 }
+        let saturationDelta = b.saturation - a.saturation
+
         try await applyColor(nodeID, from, seconds: 0)
         try await applyPower(nodeID, on: true)
-        try await applyColor(nodeID, to, seconds: seconds)
+
+        // The bulb only has 254 hue and saturation values, so more steps than that would be wasted.
+        let distinct = Int((max(abs(hueDelta), abs(saturationDelta)) * 254).rounded(.up))
+        let steps = max(1, min(distinct, Int(duration / 0.1)))
+        try await runSteps(nodeID, generation: generation, duration: duration, steps: steps) { index, stepTime in
+            let progress = Double(index) / Double(steps)
+            var hue = (a.hue + hueDelta * progress).truncatingRemainder(dividingBy: 1)
+            if hue < 0 { hue += 1 }
+            let saturation = min(max(a.saturation + saturationDelta * progress, 0), 1)
+            try await self.applyColor(nodeID, .hueSat(hue: hue, saturation: saturation), seconds: stepTime)
+        }
+
+        // Finish on the exact target; a white ends on the bulb's real white LEDs.
+        if case .kelvin = to {
+            try await applyColor(nodeID, to, seconds: 0)
+        }
     }
 }

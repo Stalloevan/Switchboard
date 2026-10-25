@@ -67,6 +67,11 @@ final class MatterManager: NSObject, ObservableObject {
     private var localEdits: [String: Date] = [:]
 
     let endpoint = NSNumber(value: 1)
+
+    /// Bumped to cancel a running fade on a bulb (used by fades, manual controls and the Stop button).
+    var effectGeneration: [UInt64: Int] = [:]
+    /// Number of running effects that need the screen to stay on.
+    var awakeCount = 0
     private static let bulbsKey = "switchboard.bulbs"
     private static let nextNodeKey = "switchboard.nextNodeID"
 
@@ -221,6 +226,7 @@ final class MatterManager: NSObject, ObservableObject {
     }
 
     func setPower(_ nodeID: UInt64, on: Bool) {
+        stopEffects([nodeID])
         guard let device = devices[nodeID],
               let cluster = MTRClusterOnOff(device: device, endpointID: endpoint, queue: .main) else { return }
         states[nodeID, default: BulbState()].isOn = on
@@ -239,6 +245,7 @@ final class MatterManager: NSObject, ObservableObject {
     }
 
     func setLevel(_ nodeID: UInt64, fraction: Double) {
+        stopEffects([nodeID])
         states[nodeID, default: BulbState()].level = fraction
         debounce("level-\(nodeID)") { [weak self] in
             guard let self,
@@ -259,6 +266,7 @@ final class MatterManager: NSObject, ObservableObject {
     }
 
     func setColorTemp(_ nodeID: UInt64, mireds: Double) {
+        stopEffects([nodeID])
         states[nodeID, default: BulbState()].mireds = mireds
         debounce("temp-\(nodeID)") { [weak self] in
             guard let self,
@@ -279,6 +287,7 @@ final class MatterManager: NSObject, ObservableObject {
     }
 
     func setColor(_ nodeID: UInt64, hue: Double, saturation: Double) {
+        stopEffects([nodeID])
         states[nodeID, default: BulbState()].hue = hue
         states[nodeID, default: BulbState()].saturation = saturation
         debounce("color-\(nodeID)") { [weak self] in
