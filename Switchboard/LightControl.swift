@@ -377,6 +377,11 @@ extension MatterManager {
         try await applyPower(nodeID, on: true)
     }
 
+    private static func describe(_ error: Error) -> String {
+        let ns = error as NSError
+        return "\(ns.domain) \(ns.code): \(ns.localizedDescription)"
+    }
+
     /// Fades brightness in whole 1% steps. If the time is too short to send a command per percent
     /// (more than about 10 per second), the steps get larger instead.
     @MainActor
@@ -388,18 +393,41 @@ extension MatterManager {
         holdScreenAwake()
         defer { releaseScreenAwake() }
 
-        try await applyLevel(nodeID, percent: startPercent, seconds: 0, withOnOff: false)
-        try await applyPower(nodeID, on: true)
-
         let span = endPercent - startPercent
+        let steps = max(1, min(Int(abs(span).rounded()), Int(duration / 0.1)))
+        logActivity("Fade \(Int(startPercent))% to \(Int(endPercent))% over \(Int(duration)) s: \(steps) steps")
+
+        // Same opening move as the earlier version that worked: set the start level and turn on in one command.
+        try await applyLevel(nodeID, percent: startPercent, seconds: 0, withOnOff: startPercent > 1)
+        if startPercent <= 1 { try await applyPower(nodeID, on: true) }
         guard abs(span) >= 0.5 else { return }
 
-        let steps = max(1, min(Int(abs(span).rounded()), Int(duration / 0.1)))
+        var failures = 0
+        var sent = 0
+        var dropped = 0
+        var totalMs = 0.0
         try await runSteps(nodeID, generation: generation, duration: duration, steps: steps) { index, stepTime in
-            let value = startPercent + span * Double(index) / Double(steps)
-            // Each step glides for exactly one step's time, so the motion is continuous.
-            try await self.applyLevel(nodeID, percent: value.rounded(), seconds: stepTime, withOnOff: false)
+            let value = (startPercent + span * Double(index) / Double(steps)).rounded()
+            let began = Date()
+            do {
+                // Each step glides for exactly one step's time, so the motion is continuous.
+                try await self.applyLevel(nodeID, percent: value, seconds: stepTime, withOnOff: value > 1)
+                failures = 0
+                sent += 1
+                totalMs += Date().timeIntervalSince(began) * 1000
+                if sent <= 3 {
+                    self.logActivity("  step \(index)/\(steps) to \(Int(value))%: ok in \(Int(Date().timeIntervalSince(began) * 1000)) ms")
+                }
+            } catch {
+                failures += 1
+                dropped += 1
+                self.logActivity("  step \(index)/\(steps) FAILED: \(Self.describe(error))")
+                // One dropped command shouldn't end the fade; several in a row mean the bulb isn't answering.
+                if failures >= 3 { throw error }
+            }
         }
+        let average = sent > 0 ? Int(totalMs / Double(sent)) : 0
+        logActivity("Fade finished: \(sent) steps sent, \(dropped) failed, average \(average) ms per command")
     }
 
     /// Fades between two colors by sending many small hue/saturation steps (the bulb's own color
@@ -421,23 +449,98 @@ extension MatterManager {
         if hueDelta < -0.5 { hueDelta += 1 }
         let saturationDelta = b.saturation - a.saturation
 
-        try await applyColor(nodeID, from, seconds: 0)
-        try await applyPower(nodeID, on: true)
-
         // The bulb only has 254 hue and saturation values, so more steps than that would be wasted.
         let distinct = Int((max(abs(hueDelta), abs(saturationDelta)) * 254).rounded(.up))
         let steps = max(1, min(distinct, Int(duration / 0.1)))
+        logActivity("Color fade over \(Int(duration)) s: \(steps) steps (hue change \(Int(abs(hueDelta) * 360))°)")
+
+        try await applyColor(nodeID, from, seconds: 0)
+        try await applyPower(nodeID, on: true)
+
+        var failures = 0
+        var sent = 0
+        var dropped = 0
+        var totalMs = 0.0
         try await runSteps(nodeID, generation: generation, duration: duration, steps: steps) { index, stepTime in
             let progress = Double(index) / Double(steps)
             var hue = (a.hue + hueDelta * progress).truncatingRemainder(dividingBy: 1)
             if hue < 0 { hue += 1 }
             let saturation = min(max(a.saturation + saturationDelta * progress, 0), 1)
-            try await self.applyColor(nodeID, .hueSat(hue: hue, saturation: saturation), seconds: stepTime)
+            let began = Date()
+            do {
+                try await self.applyColor(nodeID, .hueSat(hue: hue, saturation: saturation), seconds: stepTime)
+                failures = 0
+                sent += 1
+                totalMs += Date().timeIntervalSince(began) * 1000
+                if sent <= 3 {
+                    self.logActivity("  step \(index)/\(steps): ok in \(Int(Date().timeIntervalSince(began) * 1000)) ms")
+                }
+            } catch {
+                failures += 1
+                dropped += 1
+                self.logActivity("  step \(index)/\(steps) FAILED: \(Self.describe(error))")
+                if failures >= 3 { throw error }
+            }
         }
 
         // Finish on the exact target; a white ends on the bulb's real white LEDs.
         if case .kelvin = to {
             try await applyColor(nodeID, to, seconds: 0)
         }
+        let average = sent > 0 ? Int(totalMs / Double(sent)) : 0
+        logActivity("Color fade finished: \(sent) steps sent, \(dropped) failed, average \(average) ms per command")
+    }
+
+    // MARK: Bulb report
+
+    private static func listOfNumbers(_ attribute: [String: Any]?) -> [Int]? {
+        guard let items = attribute?[MTRValueKey] as? [[String: Any]] else { return nil }
+        return items.compactMap { item in
+            (item[MTRDataKey] as? [String: Any])?[MTRValueKey] as? NSNumber
+        }.map { $0.intValue }
+    }
+
+    /// Reads what the bulb itself says it can do, so we know which built-in transitions it offers.
+    func bulbReport(_ nodeID: UInt64) -> [String] {
+        guard let device = devices[nodeID] else { return ["Unknown bulb."] }
+        var lines = ["Bulb report (node \(nodeID), \(device.state == .reachable ? "reachable" : "not reachable"), cache \(device.deviceCachePrimed ? "ready" : "not ready")):"]
+
+        if let level = MTRClusterLevelControl(device: device, endpointID: endpoint, queue: .main) {
+            lines.append("Brightness (Level Control):")
+            if let v = Self.valueOf(level.readAttributeFeatureMap(with: nil)) { lines.append("  features: \(v.intValue) (on/off \(v.intValue & 1 != 0), lighting \(v.intValue & 2 != 0))") }
+            if let v = Self.valueOf(level.readAttributeCurrentLevel(with: nil)) { lines.append("  current level: \(v.intValue) of 254") }
+            if let v = Self.valueOf(level.readAttributeMinLevel(with: nil)) { lines.append("  minimum level: \(v.intValue)") }
+            if let v = Self.valueOf(level.readAttributeOnOffTransitionTime(with: nil)) { lines.append("  built-in on/off transition: \(Double(v.intValue) / 10) s") }
+            if let ids = Self.listOfNumbers(level.readAttributeAcceptedCommandList(with: nil)) {
+                let names: [Int: String] = [0: "MoveToLevel", 1: "Move", 2: "Step", 3: "Stop", 4: "MoveToLevelWithOnOff", 5: "MoveWithOnOff", 6: "StepWithOnOff", 7: "StopWithOnOff"]
+                lines.append("  commands: " + ids.sorted().map { names[$0] ?? String($0) }.joined(separator: ", "))
+            } else {
+                lines.append("  commands: not available yet")
+            }
+        }
+
+        if let color = MTRClusterColorControl(device: device, endpointID: endpoint, queue: .main) {
+            lines.append("Color (Color Control):")
+            if let v = Self.valueOf(color.readAttributeColorCapabilities(with: nil)) {
+                let bits = v.intValue
+                lines.append("  supports: hue/saturation \(bits & 1 != 0), XY \(bits & 8 != 0), color temperature \(bits & 16 != 0), color loop \(bits & 4 != 0)")
+            } else {
+                lines.append("  capabilities: not available yet")
+            }
+            if let v = Self.valueOf(color.readAttributeColorMode(with: nil)) { lines.append("  current mode: \(["hue/saturation", "XY", "color temperature"][min(max(v.intValue, 0), 2)])") }
+            if let lo = Self.valueOf(color.readAttributeColorTempPhysicalMinMireds(with: nil)),
+               let hi = Self.valueOf(color.readAttributeColorTempPhysicalMaxMireds(with: nil)) {
+                lines.append("  white range: \(1_000_000 / max(hi.intValue, 1)) K to \(1_000_000 / max(lo.intValue, 1)) K")
+            }
+            if let ids = Self.listOfNumbers(color.readAttributeAcceptedCommandList(with: nil)) {
+                let names: [Int: String] = [0: "MoveToHue", 1: "MoveHue", 2: "StepHue", 3: "MoveToSaturation", 4: "MoveSaturation", 5: "StepSaturation", 6: "MoveToHueAndSaturation", 7: "MoveToColor", 8: "MoveColor", 9: "StepColor", 10: "MoveToColorTemperature", 0x40: "EnhancedMoveToHue", 0x41: "EnhancedMoveHue", 0x42: "EnhancedStepHue", 0x43: "EnhancedMoveToHueAndSaturation", 0x44: "ColorLoopSet", 0x47: "StopMoveStep", 0x4B: "MoveColorTemperature", 0x4C: "StepColorTemperature"]
+                lines.append("  commands: " + ids.sorted().map { names[$0] ?? String($0) }.joined(separator: ", "))
+            } else {
+                lines.append("  commands: not available yet")
+            }
+        } else {
+            lines.append("Color: this bulb has no Color Control cluster (brightness only).")
+        }
+        return lines
     }
 }

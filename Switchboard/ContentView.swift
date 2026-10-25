@@ -152,6 +152,12 @@ struct BulbCard: View {
                         var b: CGFloat = 0
                         var a: CGFloat = 0
                         if UIColor(newColor).getHue(&h, saturation: &s, brightness: &b, alpha: &a) {
+                            // The picker can echo back the color it was just given (for example while a
+                            // fade updates it). Ignore that, or it would cancel the fade.
+                            let current = matter.states[bulb.nodeID] ?? BulbState()
+                            if abs(Double(h) - current.hue) < 0.02 && abs(Double(s) - current.saturation) < 0.02 {
+                                return
+                            }
                             matter.setColor(bulb.nodeID, hue: Double(h), saturation: Double(s))
                         }
                     }

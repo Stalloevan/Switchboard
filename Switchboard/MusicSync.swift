@@ -35,8 +35,15 @@ final class MusicSync: ObservableObject {
     private var fastAverage: Double = 0
     private var slowAverage: Double = 0
     private var lastBeat: CFTimeInterval = 0
+    private var framesIn = 0
 
     // Main-thread state.
+    private var statTimer: Timer?
+    private var lastFramesIn = 0
+    private var commandsSent = 0
+    private var commandsFailed = 0
+    private var totalMs = 0.0
+    private var lastError = ""
     private var envelope: Double = 0
     private var flash: Double = 0
     private var lastFrame: CFTimeInterval = 0
@@ -75,6 +82,8 @@ final class MusicSync: ObservableObject {
     func stop() {
         guard isRunning else { return }
         isRunning = false
+        statTimer?.invalidate()
+        statTimer = nil
         engine.stop()
         if let sink {
             engine.detach(sink)
@@ -124,6 +133,12 @@ final class MusicSync: ObservableObject {
         desiredPercent = [:]
         lastPercent = [:]
         pendingHue = [:]
+        framesIn = 0
+        lastFramesIn = 0
+        commandsSent = 0
+        commandsFailed = 0
+        totalMs = 0
+        lastError = ""
 
         // A sink node receives audio in the hardware's small buffers, which keeps latency low.
         let sinkNode = AVAudioSinkNode { [weak self] _, frameCount, audioBufferList in
@@ -147,6 +162,10 @@ final class MusicSync: ObservableObject {
         matter?.holdScreenAwake()
         isRunning = true
         note = "Listening. Play some music near the phone."
+        matter?.logActivity("Music sync started (\(mode.rawValue), \(targets.count) bulb(s), mic \(Int(sampleRate)) Hz)")
+        statTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            self?.reportStats()
+        }
     }
 
     // MARK: Audio analysis (audio thread)
@@ -172,6 +191,7 @@ final class MusicSync: ObservableObject {
 
         // Analyze in windows of about 10 ms.
         guard accumulated >= 480 else { return }
+        framesIn += 1
         let n = Float(accumulated)
         let rmsFull = (sumFull / n).squareRoot()
         let rmsBass = (sumBass / n).squareRoot()
@@ -253,9 +273,34 @@ final class MusicSync: ObservableObject {
         if let last = lastPercent[id], abs(wanted - last) < 1.5 { return }
         lastPercent[id] = wanted
         busy.insert(id)
-        matter.lightLevel(id, percent: wanted, seconds: 0, withOnOff: false) { [weak self] _ in
-            self?.busy.remove(id)
-            self?.pump(id)
+        let began = CACurrentMediaTime()
+        matter.lightLevel(id, percent: wanted, seconds: 0, withOnOff: false) { [weak self] error in
+            guard let self else { return }
+            self.commandsSent += 1
+            self.totalMs += (CACurrentMediaTime() - began) * 1000
+            if let error {
+                self.commandsFailed += 1
+                self.lastError = " (last error: \((error as NSError).domain) \((error as NSError).code))"
+            }
+            self.busy.remove(id)
+            self.pump(id)
         }
+    }
+
+    /// Every 2 seconds, say what the microphone and the bulbs are doing, so problems are visible.
+    private func reportStats() {
+        guard isRunning else { return }
+        if framesIn == 0 {
+            note = "No audio is arriving from the microphone."
+            matter?.logActivity("Music: no microphone audio received")
+            return
+        }
+        let windows = (framesIn - lastFramesIn) / 2
+        lastFramesIn = framesIn
+        let average = commandsSent > 0 ? Int(totalMs / Double(commandsSent)) : 0
+        matter?.logActivity("Music: \(windows) audio windows/s, \(commandsSent / 2) commands/s, \(commandsFailed) failed, avg \(average) ms\(lastError)")
+        commandsSent = 0
+        commandsFailed = 0
+        totalMs = 0
     }
 }

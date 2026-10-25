@@ -53,6 +53,8 @@ final class MatterManager: NSObject, ObservableObject {
     @Published private(set) var pairingError: String?
     @Published private(set) var pairingLog: [String] = []
     @Published var errorMessage: String?
+    /// Recent fade / music / diagnostic messages, newest last. Shown in the Scenes screen.
+    @Published private(set) var activity: [String] = []
 
     private let storage = MatterStorage()
     private var rootKeypair: RootKeypair?
@@ -81,6 +83,21 @@ final class MatterManager: NSObject, ObservableObject {
     override init() {
         super.init()
         bulbs = Self.loadBulbs()
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
+
+    func logActivity(_ text: String) {
+        activity.append("\(Self.timeFormatter.string(from: Date()))  \(text)")
+        if activity.count > 150 { activity.removeFirst(activity.count - 150) }
+    }
+
+    func clearActivity() {
+        activity = []
     }
 
     // MARK: Startup

@@ -128,6 +128,27 @@ struct ScenesView: View {
                             .font(.footnote)
                     }
                 }
+
+                Section {
+                    Button("Check bulb") {
+                        for id in targetIDs {
+                            for line in matter.bulbReport(id) { matter.logActivity(line) }
+                        }
+                    }
+                    if !matter.activity.isEmpty {
+                        Text(matter.activity.suffix(40).joined(separator: "\n"))
+                            .font(.system(.caption2, design: .monospaced))
+                            .textSelection(.enabled)
+                        Button("Copy log") {
+                            UIPasteboard.general.string = matter.activity.joined(separator: "\n")
+                        }
+                        Button("Clear log", role: .destructive) { matter.clearActivity() }
+                    }
+                } header: {
+                    Text("Diagnostics")
+                } footer: {
+                    Text("If something doesn't work, tap Check bulb, try it again, then copy the log and send it over.")
+                }
             }
             .navigationTitle("Scenes")
             .navigationBarTitleDisplayMode(.inline)
