@@ -18,7 +18,7 @@ jobs:
       - id: ver
         run: echo "version=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
 
-      - name: Fetch app icon (Icons8)
+      - name: Fetch app icon
         run: ./Tools/fetch_icon.sh
 
       - name: Generate Xcode project
@@ -65,5 +65,5 @@ jobs:
             "Switchboard-v${{ steps.ver.outputs.version }}.ipa" \
             AppIcon-1024.png \
             --title "Switchboard v${{ steps.ver.outputs.version }}" \
-            --notes "App icon: Matter icon from Icons8 ($(cat Tools/icon-source.txt))" \
+            --notes "App icon: Matter logo from Dashboard Icons by Homarr Labs ($(cat Tools/icon-source.txt))" \
             --target "${{ github.sha }}"

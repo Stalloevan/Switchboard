@@ -1,34 +1,20 @@
 #!/bin/bash
-# Downloads the Matter icon from Icons8 and builds the app icon. Prints the source URL to Tools/icon-source.txt.
+# Downloads the Matter logo (Dashboard Icons by Homarr Labs) and builds the 1024px app icon.
+# Records the source URL in Tools/icon-source.txt for the release notes.
 set -euo pipefail
 
+url="https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/matter.png"
 out_dir="Switchboard/Assets.xcassets/AppIcon.appiconset"
 tmp="$(mktemp -d)"
-found=""
-tried=""
+mkdir -p "$out_dir"
 
-for name in matter matter-logo; do
-  for style in fluency color ios-filled ios material-rounded glyph-neue nolan office; do
-    for size in 1024 512 256; do
-      url="https://img.icons8.com/$style/$size/$name.png"
-      tried="$tried $url"
-      if curl -fsSL --max-time 30 -o "$tmp/src.png" "$url" 2>/dev/null \
-         && file "$tmp/src.png" | grep -q "PNG image" \
-         && [ "$(stat -f%z "$tmp/src.png")" -gt 1500 ]; then
-        found="$url"
-        break 3
-      fi
-    done
-  done
-done
-
-if [ -z "$found" ]; then
-  echo "::error::No Matter icon found on icons8. Tried:$tried"
+curl -fsSL --max-time 60 -o "$tmp/src.png" "$url"
+if ! file "$tmp/src.png" | grep -q "PNG image"; then
+  echo "::error::Downloaded file from $url is not a PNG"
   exit 1
 fi
 
-echo "Using icon: $found"
-echo "$found" > Tools/icon-source.txt
+echo "$url" > Tools/icon-source.txt
 
 python3 -m venv "$tmp/venv"
 "$tmp/venv/bin/pip" install --quiet pillow

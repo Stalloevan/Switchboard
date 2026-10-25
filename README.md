@@ -33,4 +33,4 @@ The project is generated with [XcodeGen](https://github.com/yonaskolb/XcodeGen) 
 
 ## Credits
 
-The app icon is a Matter icon from [Icons8](https://icons8.com); the exact source URL is recorded in each release's notes.
+The app icon is the Matter logo from [Dashboard Icons](https://dashboardicons.com) by Homarr Labs; the exact source URL is recorded in each release's notes.
