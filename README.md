@@ -30,3 +30,7 @@ The project is generated with [XcodeGen](https://github.com/yonaskolb/XcodeGen) 
 - Device attestation failures are ignored while pairing, because a personal controller doesn't carry Matter's full certificate trust store. Only pair bulbs you own.
 - The fabric's signing key lives in the Keychain and its data in the app's Application Support folder. Reinstalling with a different signing identity can lose the key, in which case bulbs must be factory reset and paired again.
 - Removing a bulb in the app only forgets it locally; factory reset the bulb before pairing it elsewhere.
+
+## Credits
+
+The app icon is a Matter icon from [Icons8](https://icons8.com); the exact source URL is recorded in each release's notes.
