@@ -61,6 +61,7 @@ final class MatterManager: NSObject, ObservableObject {
     private var nodeIDs: [ObjectIdentifier: UInt64] = [:]
     private var pending: PendingBulb?
     private var pairingTimeout: DispatchWorkItem?
+    private var bluetoothProbe: BluetoothProbe?
 
     private var debounced: [String: DispatchWorkItem] = [:]
     private var localEdits: [String: Date] = [:]
@@ -326,8 +327,24 @@ final class MatterManager: NSObject, ObservableObject {
             isCommissioning = true
             status = "Looking for the bulb…"
             startPairingTimeout(nodeID: nodeID)
-            log("Starting session for node \(nodeID), Wi-Fi details \(ssid.isEmpty ? "not given" : "given")")
-            try controller.setupCommissioningSession(with: payload, newNodeID: NSNumber(value: nodeID))
+
+            status = "Checking Bluetooth…"
+            let probe = BluetoothProbe(
+                shortDiscriminator: payload.hasShortDiscriminator ? payload.discriminator.intValue : nil,
+                log: { [weak self] text in self?.log(text) },
+                completion: { [weak self] in
+                    guard let self, let pending = self.pending, pending.nodeID == nodeID else { return }
+                    self.bluetoothProbe = nil
+                    self.status = "Looking for the bulb…"
+                    self.log("Starting session for node \(nodeID), Wi-Fi details \(ssid.isEmpty ? "not given" : "given")")
+                    do {
+                        try controller.setupCommissioningSession(with: payload, newNodeID: NSNumber(value: nodeID))
+                    } catch {
+                        self.finishPairing(error: error)
+                    }
+                })
+            bluetoothProbe = probe
+            probe.start()
         } catch {
             finishPairing(error: error)
         }
@@ -363,6 +380,7 @@ final class MatterManager: NSObject, ObservableObject {
     private func finishPairing(error: Error?) {
         pairingTimeout?.cancel()
         pairingTimeout = nil
+        bluetoothProbe = nil
         isCommissioning = false
 
         if let error {
