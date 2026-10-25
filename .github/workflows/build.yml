@@ -25,8 +25,8 @@ jobs:
 
       - name: Build (unsigned)
         run: |
-          set -o pipefail
           xcodebuild -version
+          set +e
           xcodebuild \
             -project Switchboard.xcodeproj \
             -scheme Switchboard \
@@ -37,7 +37,16 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build
+            build > build.log 2>&1
+          status=$?
+          set -e
+          if [ $status -ne 0 ]; then
+            grep -E "error:" build.log | sort -u | head -30 | while IFS= read -r line; do
+              echo "::error::${line//$'\r'/}"
+            done
+            tail -n 30 build.log | while IFS= read -r line; do echo "::warning::${line}"; done
+            exit $status
+          fi
 
       - name: Package IPA
         run: |
